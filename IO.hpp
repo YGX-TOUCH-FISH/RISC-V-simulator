@@ -4,23 +4,40 @@
 
 #ifndef RISK_V_SIMULATOR_IO_HPP
 #define RISK_V_SIMULATOR_IO_HPP
-//used for read Machine Order from stdin, write Ret by stdout.
 #include <iostream>
 #include <fstream>
 #include <sstream>
 #include "Saver.hpp"
 #include "Executer.hpp"
 #include "exception.hpp"
+//TODO hazard：
+// //
+// 结构冒险：同一时钟周期访问相同的硬件
+// 寄存器的读写速度快，前半个时钟周期写，后半个时钟周期读
+// 且设置独立的读写口
+// //
+// 数据冒险：这一条指令所需的数据还未被写入，但下一条指令需要该数据
+// 1 插入nop指令
+// 2 数据前递，由上一条指令的ALU结果传给下一条指令的ALU(Bypass)
+// Load Use Hazard: 一条指令需要用到之前指令的访存结果，插入nop, forwarding
+// //
+// 控制冒险：下一次取指由上一条指令的结果确定
+// 转移会使部分取指被废除
+// 无条件间接转移：等待1clock至译码结束
+// 条件转移：译码结束后，交由ALU比较(条件)。但如果条件是[是否相等]这种比较简单的条件，不需ALU，可在ID阶段结束后返回值
+
 using namespace std;
 namespace RA {
     class ioSystem {
     private:
         Memory memory;
-        //用32位的unsigned int存储memory, memory[i]储存了1个字节的信息
         Register X;
-        unsigned int pc = 0;
+        unsigned pc = 0;
+        Order ID_EXE;
+        Order EXE_MEM;
+        Order MEM_WB;
+        //两stage之间的指令状态
     private:
-        //high-pos is behind
         unsigned read(unsigned offset, unsigned n) {
             unsigned ret = 0;
             for (int i = n-1 ; i >= 0 ; --i) {
@@ -29,318 +46,555 @@ namespace RA {
             }
             return ret;
         }
-
         void write(unsigned msg, unsigned offset, int num){
             for (int i = 0 ; i < num ; ++i) {
                 unsigned piece = cut(msg, i*8+7, i*8);
                 memory[offset+i] = piece;
             }
         }
-
-        unsigned fetch(unsigned offset) {
-            //[offset], .. [offset+3]
+        unsigned IF(unsigned offset) {
             unsigned ret = 0;
             for (int i = 3 ; i >= 0 ; --i) {
                 ret <<= 8;
                 ret |= memory[offset+i];
             }
             return ret;
-        }//fetch 4 memory everytime, change direction
+        }
+        //Instrcution Fetch
 
-        bool Execute(unsigned Order) {
-            if (Order == 0x0ff00513) {
+        pair<Order, bool> ID(unsigned order) {
+            Order ret;
+            if (order == 0x0ff00513) {
                 cout << (((unsigned)X[10]) & 255u);
                 exit(0);
             }
-            unsigned int order(Order), opcode(0), funct3(0), funct7(0), rd(0), rs1(0), rs2(0), offset(0), mem(0);
-            opcode = cut(order, 6, 0);
-            if (opcode == 55) {
-                //Load Upper Immediate
-                // 将立即数imm加载到寄存器x[rd]的高20位
-                rd = cut(order, 11, 7);
-                X[rd] = cut(order, 31, 12)<<12;
+            ret.opcode = cut(order, 6, 0);
+
+            if (ret.opcode == 55) {
+                ret.rd = cut(order, 11, 7);
+                ret.xrd = X[ret.rd];
+                ret.imm = cut(order, 31, 12)<<12;
+                ret.type = lui;
+                return make_pair(ret, false);
             }
-            //0110111
-            else if (opcode == 23) {
-                //AUIPC
-                rd = cut(order, 11, 7);
-                X[rd] = pc + (cut(order, 31, 12)<<12);
+            else if (ret.opcode == 23) {
+                ret.rd = cut(order, 11, 7);
+                ret.xrd = X[ret.rd];
+                ret.imm = cut(order, 31, 12)<<12;
+                ret.type = auipc;
+                return make_pair(ret, false);
             }
-            //0010111
-            else if (opcode == 111) {
-                //Jump And Link
-                rd = cut(order, 11, 7);
-//                if (rd == 0) throw syntax_error();
+            else if (ret.opcode == 111) {
+                ret.rd = cut(order, 11, 7);
+                ret.xrd = X[ret.rd];
+                ret.type = jal;
                 unsigned p1(cut(order, 31, 31));//offset 20
                 unsigned p2(cut(order, 30, 21));//offset 10-1
                 unsigned p3(cut(order, 20, 20));//offset 11
                 unsigned p4(cut(order, 19, 12));//offset 19-12
+                ret.imm = (p1<<20)|(p4<<12)|(p3<<11)|(p2<<1);
+                ret.imm = sign_ext(ret.imm, 20);
+                return make_pair(ret, true);
+            }
+            else if (ret.opcode == 103) {
+                ret.rd = cut(order, 11, 7);
+                ret.xrd = X[ret.rd];
+                ret.rs1 = cut(order, 19, 15);
+                ret.xrs1 = X[ret.rs1];
+                ret.type = jalr;
+                ret.imm = sign_ext(cut(order, 31, 20), 11);
+                return make_pair(ret, true);
+            }
+            else if (ret.opcode == 99) {
+                unsigned p1(cut(order, 31, 31));//offset 12
+                unsigned p2(cut(order, 30, 25));//offset 10-5
+                unsigned p3(cut(order, 11, 8));//offset 4-1
+                unsigned p4(cut(order, 7, 7));//offset 11
 
-                if (rd != 0) X[rd] = pc + 4;
-                unsigned imm = (p1<<20)|(p4<<12)|(p3<<11)|(p2<<1);
-                pc += sign_ext(imm, 20);
-                return true;
-            }
-            //1101111
-            else if (opcode == 103) {
-                //Jump And Link Register
-                rd = cut(order, 11, 7);
-                rs1 = cut(order, 19, 15);
-                unsigned t = pc + 4;
-                unsigned imm = sign_ext(cut(order, 31, 20), 11);
-                pc = (X[rs1]+ imm)&(-1);
-                if (rd != 0) X[rd] = t;
-                return true;
-            }
-            //1100111
-            else if (opcode == 99) {
-                unsigned offset1(cut(order, 31, 31));//offset 12
-                unsigned offset2(cut(order, 30, 25));//offset 10-5
-                unsigned offset3(cut(order, 11, 8));//offset 4-1
-                unsigned offset4(cut(order, 7, 7));//offset 11
-                offset = (offset1<<12)|(offset2<<5)|(offset3<<1)|(offset4<<11);
-                offset = sign_ext(offset, 12);
+                ret.imm = (p1<<12)|(p2<<5)|(p3<<1)|(p4<<11);
+                ret.imm = sign_ext(ret.imm, 12);
 
-                funct3 = cut(order, 14, 12);
-                rs1 = cut(order, 19, 15);
-                rs2 = cut(order, 24, 20);
-
-                if (funct3 == 0) {
-                    if (X[rs1] == X[rs2]) {
-                        pc += offset;
-                        return true;
-                    }
-                }//beq
-                else if (funct3 == 1) {
-                    if (X[rs1] != X[rs2]) {
-                        pc += offset;
-                        return true;
-                    }
-                }//bne
-                else if (funct3 == 4) {
-                    //视为二进制补码：signed
-                    if ((signed)X[rs1] < (signed)X[rs2]) {
-                        pc += offset;
-                        return true;
-                    }
-                }//blt
-                else if (funct3 == 5) {
-                    if ((signed)X[rs1] >= (signed)X[rs2]) {
-                        pc += offset;
-                        return true;
-                    }
-                }//bge
-                else if (funct3 == 6) {
-                    if (X[rs1] < X[rs2]) {
-                        pc += offset;
-                        return true;
-                    }
-                }//bltu
-                else if (funct3 == 7) {
-                    if (X[rs1] >= X[rs2]) {
-                        pc += offset;
-                        return true;
-                    }
-                }//BGEU
-                else throw syntax_error();
+                ret.funct3 = cut(order, 14, 12);
+                ret.rs1 = cut(order, 19, 15);
+                ret.rs2 = cut(order, 24, 20);
+                ret.xrs1 = X[ret.rs1];
+                ret.xrs2 = X[ret.rs2];
+                switch (ret.funct3) {
+                    case 0: ret.type = beq; break;
+                    case 1: ret.type = bne; break;
+                    case 4: ret.type = blt; break;
+                    case 5: ret.type = bge; break;
+                    case 6: ret.type = bltu; break;
+                    case 7: ret.type = bgeu; break;
+                }
+                return make_pair(ret, false);
             }
-            //1100011
-            else if (opcode == 3) {
-                rd = cut(order, 11, 7);
-                funct3 = cut(order, 14, 12);
-                rs1 = cut(order, 19, 15);
-                offset = X[rs1] + sign_ext(cut(order, 31, 20), 11);
-                if (rd == 0) throw syntax_error();
-                if (funct3 == 0) {
-                    mem = read(offset, 1);
-                    X[rd] = sign_ext(mem, 7);
-                    //Load Byte
+            else if (ret.opcode == 3) {
+                ret.rd = cut(order, 11, 7);
+                ret.xrd = X[ret.rd];
+                ret.funct3 = cut(order, 14, 12);
+                ret.rs1 = cut(order, 19, 15);
+                ret.xrs1 = X[ret.rs1];
+                ret.imm = sign_ext(cut(order, 31, 20), 11);
+                switch (ret.funct3) {
+                    case 0: ret.type = lb; break;
+                    case 1: ret.type = lh; break;
+                    case 2: ret.type = lw; break;
+                    case 4: ret.type = lbu;break;
+                    case 5: ret.type = lhu;break;
                 }
-                else if (funct3 == 1) {
-                    mem = read(offset, 2);
-                    X[rd] = sign_ext(mem, 15);
-                    //Load Halfword
-                }
-                else if (funct3 == 2) {
-                    X[rd] = read(offset, 4);
-                    //Load Word
-                }
-                else if (funct3 == 4) {
-                    X[rd] = read(offset, 1);
-                    //Load Byte Unsigned
-                }
-                else if (funct3 == 5) {
-                    X[rd] = read(offset, 2);
-                    //Load Halfword Unsigned
-                }
-                else throw unknown_field();
+                return make_pair(ret, false);
             }
-            //0000011
-            else if (opcode == 35) {
-                funct3 = cut(order, 14, 12);
-                rs1 = cut(order, 19, 15);
-                rs2 = cut(order, 24, 20);
-                unsigned offset1(cut(order, 31, 25)), offset2(cut(order, 11, 7));
-                offset1 <<= 5;
-                offset = X[rs1] + sign_ext(offset1|offset2, 11);
-                if (funct3 == 0) {
-                    //Save Byte
-                    unsigned byt(cut(X[rs2], 7, 0));
-                    write(byt, offset, 1);
+            else if (ret.opcode == 35) {
+                ret.funct3 = cut(order, 14, 12);
+                ret.rs1 = cut(order, 19, 15);
+                ret.xrs1 = X[ret.rs1];
+                ret.rs2 = cut(order, 24, 20);
+                ret.xrs2 = X[ret.rs2];
+                unsigned p1(cut(order, 31, 25));
+                unsigned p2(cut(order, 11, 7));
+                ret.imm = (p1<<5)|p2;
+                ret.imm = sign_ext(ret.imm, 11);
+                switch (ret.funct3) {
+                    case 0: ret.type = sb;break;
+                    case 1: ret.type = sh;break;
+                    case 2: ret.type = sw;break;
                 }
-                else if (funct3 == 1) {
-                    //Save Halfword
-                    unsigned byt(cut(X[rs2], 15, 0));
-                    write(byt, offset, 2);
-                }
-                else if (funct3 == 2) {
-                    //Save Word
-                    unsigned byt = X[rs2];
-                    write(byt, offset, 4);
-                }
-                else throw unknown_field();
+                return make_pair(ret, false);
             }
-            //0100011
-            else if (opcode == 19) {
-                rd = cut(order, 11, 7);
-                funct3 = cut(order, 14, 12);
-                rs1 = cut(order, 19, 15);
-                if (rd == 0) throw syntax_error();
-                if (funct3 == 0) {
-                    //addi
-                    unsigned imm = sign_ext(cut(order, 31, 20), 11);
-                    X[rd] = X[rs1] + imm;
-                }
-                else if (funct3 == 2) {
-                    //slti: set if less than immediate
-                    unsigned immediate = sign_ext(cut(order, 31, 20), 11);
-                    if (X[rs1] < (signed)immediate) X[rd] = 1;
-                    else X[rd] = 0;
-                }
-                else if (funct3 == 3) {
-                    //sltiu: set if less than immediate, unsigned
-                    unsigned immediate = sign_ext(cut(order, 31, 20), 11);
-                    if (X[rs1] < immediate) X[rd] = 1;
-                    else X[rd] = 0;
-                }
-                else if (funct3 == 4) {
-                    //Exclusive-Or immediate
-                    unsigned immediate = sign_ext(cut(order, 31, 20), 11);
-                    X[rd] = X[rs1]^immediate;
-                }
-                else if (funct3 == 6) {
-                    //OR immediate
-                    unsigned immediate = sign_ext(cut(order, 31, 20), 11);
-                    X[rd] = X[rs1]|immediate;
-                }
-                else if (funct3 == 7) {
-                    //And immediate
-                    unsigned immediate = sign_ext(cut(order, 31, 20), 11);
-                    X[rd] = X[rs1]&immediate;
-                }
-                else if (funct3 == 1) {
-                    //shift left logical immediate
-                    unsigned shamt = cut(order, 25, 20);
-                    if (cut(shamt, 5, 5) != 0) throw syntax_error();
-                    X[rd] = X[rs1]<<shamt;
-                }
-                else if (funct3 == 5) {
-                    unsigned flag = cut(order, 31, 25);
-                    if (flag == 0) {
-                        //shift right logical immediate
-                        unsigned shamt = cut(order, 25, 20);
-                        if (cut(shamt, 5, 5) != 0) throw syntax_error();
-                        X[rd] = X[rs1]>>shamt;
+            else if (ret.opcode == 19) {
+                ret.rd = cut(order, 11, 7);
+                ret.xrd = X[ret.rd];
+                ret.funct3 = cut(order, 14, 12);
+                ret.rs1 = cut(order, 19, 15);
+                ret.xrs1 = X[ret.rs1];
+                ret.imm = sign_ext(cut(order, 31, 20), 11);
+                ret.shamt = cut(order, 25, 20);
+                ret.funct7 = cut(order, 31, 25);
+                switch (ret.funct3) {
+                    case 0:ret.type = addi;break;
+                    case 1:ret.type = slli;break;
+                    case 2:ret.type = slti;break;
+                    case 3:ret.type = sltiu;break;
+                    case 4:ret.type = xori;break;
+                    case 5: {
+                        if (ret.funct7 == 0) ret.type = srli;
+                        else ret.type = srai;
+                        break;
                     }
-                    else if (flag == 1<<5) {
-                        //shift right arithmetic immediate
-                        unsigned shamt = cut(order, 25, 20);
-                        if (cut(shamt, 5, 5) != 0) throw syntax_error();
-
-                        if (X[rs1]>>31 == 0) X[rd] = X[rs1]>>shamt;
-                        else {
-                            unsigned a = (1<<shamt)-1, b = X[rs1]>>shamt;
-                            a<<=(32-shamt);
-                            X[rd] = a|b;
-                        }
+                    case 6:ret.type = ori;break;
+                    case 7:ret.type = andi;break;
+                }
+                return make_pair(ret, false);
+            }
+            else if (ret.opcode == 51) {
+                ret.rd = cut(order, 11, 7);
+                ret.xrd = X[ret.rd];
+                ret.rs1 = cut(order, 19, 15);
+                ret.xrs1 = X[ret.rs1];
+                ret.rs2 = cut(order, 24, 20);
+                ret.xrs2 = X[ret.rs2];
+                ret.funct3 = cut(order, 14, 12);
+                ret.funct7 = cut(order, 31, 25);
+                switch (ret.funct3) {
+                    case 0: {
+                        if (ret.funct7 == 0) ret.type = add;
+                        else ret.type = sub;
+                        break;
                     }
-                    else throw invalid_visit();
+                    case 1: ret.type = sll;break;
+                    case 2: ret.type = slt;break;
+                    case 3: ret.type = sltu;break;
+                    case 4: ret.type = xorr;break;
+                    case 5: {
+                        if (ret.funct7 == 0)  ret.type = srl;
+                        else ret.type = sra;
+                        break;
+                    }
+                    case 6: ret.type = orr;break;
+                    case 7: ret.type = andd;break;
                 }
+                return make_pair(ret, false);
             }
-            //0010011
-            else if (opcode == 51) {
-                rd = cut(order, 11, 7);
-                funct3 = cut(order, 14, 12);
-                rs1 = cut(order, 19, 15);
-                rs2 = cut(order, 24, 20);
-                funct7 = cut(order, 31, 25);
-                if (rd == 0) throw syntax_error();
-                if (funct3 == 0 && funct7 == 0) {
-                    //add
-                    X[rd] = X[rs1]+X[rs2];
-                }
-                else if (funct3 == 0 && funct7 == 32) {
-                    //sub
-                    X[rd] = X[rs1]-X[rs2];
-                }
-                else if (funct3 == 1) {
-                    //sll
-                    unsigned shamt = cut(order, 25, 20);
-                    if (cut(shamt, 5, 5) != 0) throw invalid_visit();
-                    X[rd] = X[rs1] << shamt;
-                }
-                else if (funct3 == 2) {
-                    //slt
-                    if ((signed)X[rs1] < (signed)X[rs2]) X[rd] = 1;
-                    else X[rd] = 0;
-                }
-                else if (funct3 == 3) {
-                    //sltu
-                    if (X[rs1] < X[rs2]) X[rd] = 1;
-                    else X[rd] = 0;
-                }
-                else if (funct3 == 4) {
-                    //xor
-                    X[rd] = X[rs1]^X[rs2];
-                }
-                else if (funct3 == 5 && funct7 == 0) {
-                    //srl
-                    unsigned shamt = cut(X[rs2], 4, 0);
-                    X[rd] = X[rs1]>>shamt;
-                }
-                else if (funct3 == 5 && funct7 == 32) {
-                    //sra
-                    unsigned shamt = cut(order, 25, 20);
-                    X[rd] = sign_ext(X[rs1] >>(signed)shamt, 31-(signed)shamt);
-                }
-                else if (funct3 == 6) {
-                    //or
-                    X[rd] = X[rs1]|X[rs2];
-                }
-                else if (funct3 == 7) {
-                    //and
-                    X[rd] = X[rs1]&X[rs2];
-                }
-            }
-            //0110011
-
             else throw syntax_error();
-            return false;
-            //TODO
-            // 注意，装入目的寄存器如果为x0，将会产生一个异常
-            // 所有的memory访问都是通过load/store指令
-            // 其它指令都是在寄存器之间或者寄存器和立即数之间进行运算，比如加法指令，减法指令等等
         }
+        //分解order,计算imm、寄存器的值、进行符号扩展
+        //TODO 计算关于pc的possible branch值...(risk)
+        //获取寄存器的值
+        //Instruction Decode
+
+        pair<Order, bool> EXE(Order order) {
+            Order ret(order);
+            bool jump = false;
+            switch (ret.type) {
+                case lui: {
+                    ret.xrd = ret.imm;
+                    break;
+                }
+                case auipc: {
+                    ret.xrd = pc + ret.imm;
+                    break;
+                }
+                case jal: {
+                    if (ret.rd != 0) ret.xrd = pc+4;
+                    pc += ret.imm;
+                    jump = true;
+                    break;
+                }
+                case jalr: {
+                    unsigned t = pc+4;
+                    pc = (ret.xrs1+ret.imm)&(-1);
+                    if (ret.rd != 0) ret.xrd = t;
+                    jump = true;
+                    break;
+                }
+                case beq: {
+                    if (ret.xrs1 == ret.xrs2) pc += ret.imm, jump = true;
+                    break;
+                }
+                case bne: {
+                    if (ret.xrs1 != ret.xrs2) pc += ret.imm, jump = true;
+                    break;
+                }
+                case blt: {
+                    if ((signed)ret.xrs1 < (signed)ret.xrs2) pc += ret.imm, jump = true;
+                    break;
+                }
+                case bge: {
+                    if ((signed)ret.xrs1 >= (signed)ret.xrs2) pc += ret.imm, jump = true;
+                    break;
+                }
+                case bltu: {
+                    if (ret.xrs1 < ret.xrs2) pc += ret.imm, jump = true;
+                    break;
+                }
+                case bgeu: {
+                    if (ret.xrs1 >= ret.xrs2) pc += ret.imm, jump = true;
+                    break;
+                }
+                //
+                case lb: {
+                    ret.output = ret.xrs1 + ret.imm;
+                    break;
+                }
+                case lh: {
+                    ret.output = ret.xrs1 + ret.imm;
+                    break;
+                }
+                case lw: {
+                    ret.output = ret.xrs1 + ret.imm;
+                    break;
+                }
+                case lbu: {
+                    ret.output = ret.xrs1 + ret.imm;
+                    break;
+                }
+                case lhu: {
+                    ret.output = ret.xrs1 + ret.imm;
+                    break;
+                }
+                case sb: {
+                    ret.output = ret.xrs1 + ret.imm;
+                    break;
+                }
+                case sh: {
+                    ret.output = ret.xrs1 + ret.imm;
+                    break;
+                }
+                case sw: {
+                    ret.output = ret.xrs1 + ret.imm;
+                    break;
+                }
+                //访存：计算出地址
+                case addi: {
+                    ret.xrd = ret.xrs1+ret.imm;
+                    break;
+                }
+                case slti: {
+                    if (ret.xrs1 < (signed)ret.imm) ret.xrd = 1;
+                    else ret.xrd = 0;
+                    break;
+                }
+                case sltiu: {
+                    if (ret.xrs1 < ret.imm) ret.xrd = 1;
+                    else ret.xrd = 0;
+                    break;
+                }
+                case xori: {
+                    ret.xrd = ret.xrs1^ret.imm;
+                    break;
+                }
+                case ori: {
+                    ret.xrd = ret.xrs1|ret.imm;
+                    break;
+                }
+                case andi: {
+                    ret.xrd = ret.xrs1&ret.imm;
+                    break;
+                }
+                case slli: {
+                    ret.xrd = ret.xrs1<<ret.shamt;
+                    break;
+                }
+                case srli: {
+                    ret.xrd = ret.xrs1>>ret.shamt;
+                    break;
+                }
+                case srai: {
+                    if (ret.xrs1>>31 == 0) ret.xrd = ret.xrs1>>ret.shamt;
+                    else {
+                        unsigned a = (1<<ret.shamt)-1, b = ret.xrs1>>ret.shamt;
+                        a<<=(32-ret.shamt);
+                        ret.xrd = a|b;
+                    }
+                    break;
+                }
+                case add: {
+                    ret.xrd = ret.xrs1 + ret.xrs2;
+                    break;
+                }
+                case sub: {
+                    ret.xrd = ret.xrs1 - ret.xrs2;
+                    break;
+                }
+                case sll: {
+                    ret.xrd = ret.rs1<<ret.shamt;
+                    break;
+                }
+                case slt: {
+                    if ((signed)ret.xrs1 < (signed)ret.xrs2) ret.xrd = 1;
+                    else ret.xrd = 0;
+                    break;
+                }
+                case sltu: {
+                    if (ret.xrs1 < ret.xrs2) ret.xrd = 1;
+                    else ret.xrd = 0;
+                    break;
+                }
+                case xorr: {
+                    ret.xrd = ret.xrs1^ret.xrs2;
+                    break;
+                }
+                case srl: {
+                    unsigned shmt = cut(ret.xrs2, 4, 0);
+                    ret.xrd = ret.xrs1>>shmt;
+                    break;
+                }
+                case sra: {
+                    unsigned shmt = cut(ret.xrs2, 4, 0);
+                    ret.xrd = ret.xrs1>>shmt;
+                    ret.xrd = sign_ext(ret.xrd, 31-shmt);
+                    break;
+                }
+                case orr: {
+                    ret.xrd = ret.xrs1|ret.xrs2;
+                    break;
+                }
+                case andd: {
+                    ret.xrd = ret.xrs1&ret.xrs2;
+                    break;
+                }
+            }
+            return make_pair(ret, jump);
+        }
+        //算数指令：完成运算
+        //访存指令：计算出对应地址
+        //Execute
+
+        Order MEM(Order order) {
+            Order ret(order);
+            switch (ret.type) {
+                case lb: {
+                    ret.xrd = sign_ext(read(ret.output, 1), 7);
+                    break;
+                }
+                case lh: {
+                    ret.xrd = sign_ext(read(ret.output, 2), 15);
+                    break;
+                }
+                case lw: {
+                    ret.xrd = read(ret.output, 4);
+                    break;
+                }
+                case lbu: {
+                    ret.xrd = read(ret.output, 1);
+                    break;
+                }
+                case lhu: {
+                    ret.xrd = read(ret.output, 2);
+                    break;
+                }
+                case sb: {
+                    write(cut(ret.xrs2, 7, 0), ret.output, 1);
+                    break;
+                }
+                case sh: {
+                    write(cut(ret.xrs2, 15, 0), ret.output, 2);
+                    break;
+                }
+                case sw: {
+                    write(ret.xrs2, ret.output, 4);
+                    break;
+                }
+            }
+            return ret;
+        }
+        //仅对访存指令进行操作
+        //Memory Access
+
+        Order WB(Order order) {
+            Order ret(order);
+            switch (ret.type) {
+                case lui: {
+                    X[ret.rd] = ret.xrd;
+                    break;
+                }
+                case auipc: {
+                    X[ret.rd] = ret.xrd;
+                    break;
+                }
+                case jal: {
+                    if (ret.rd != 0) X[ret.rd] = ret.xrd;
+                    break;
+                }
+                case jalr: {
+                    if (ret.rd != 0) X[ret.rd] = ret.xrd;
+                    break;
+                }
+                case lb: {
+                    X[ret.rd] = ret.xrd;
+                    break;
+                }
+                case lh: {
+                    X[ret.rd] = ret.xrd;
+                    break;
+                }
+                case lw: {
+                    X[ret.rd] = ret.xrd;
+                    break;
+                }
+                case lbu: {
+                    X[ret.rd] = ret.xrd;
+                    break;
+                }
+                case lhu: {
+                    X[ret.rd] = ret.xrd;
+                    break;
+                }
+                case addi: {
+                    X[ret.rd] = ret.xrd;
+                    break;
+                }
+                case slti: {
+                    X[ret.rd] = ret.xrd;
+                    break;
+                }
+                case sltiu: {
+                    X[ret.rd] = ret.xrd;
+                    break;
+                }
+                case xori: {
+                    X[ret.rd] = ret.xrd;
+                    break;
+                }
+                case ori: {
+                    X[ret.rd] = ret.xrd;
+                    break;
+                }
+                case andi: {
+                    X[ret.rd] = ret.xrd;
+                    break;
+                }
+                case slli: {
+                    X[ret.rd] = ret.xrd;
+                    break;
+                }
+                case srli: {
+                    X[ret.rd] = ret.xrd;
+                    break;
+                }
+                case srai: {
+                    X[ret.rd] = ret.xrd;
+                    break;
+                }
+                case add: {
+                    X[ret.rd] = ret.xrd;
+                    break;
+                }
+                case sub: {
+                    X[ret.rd] = ret.xrd;
+                    break;
+                }
+                case sll: {
+                    X[ret.rd] = ret.xrd;
+                    break;
+                }
+                case slt: {
+                    X[ret.rd] = ret.xrd;
+                    break;
+                }
+                case sltu: {
+                    X[ret.rd] = ret.xrd;
+                    break;
+                }
+                case xorr: {
+                    X[ret.rd] = ret.xrd;
+                    break;
+                }
+                case srl: {
+                    X[ret.rd] = ret.xrd;
+                    break;
+                }
+                case sra: {
+                    X[ret.rd] = ret.xrd;
+                    break;
+                }
+                case orr: {
+                    X[ret.rd] = ret.xrd;
+                    break;
+                }
+                case andd: {
+                    X[ret.rd] = ret.xrd;
+                    break;
+                }
+            }
+            return ret;
+        }
+        //对于需要写回的指令
+        //Write Back
     public:
         ioSystem() = default;
         ~ioSystem() = default;
         void run() {
+            while (true) {
+                try {
+                    bool jump = false, jump1 = false, jump2 = false;
+                    unsigned order = IF(pc);
+                    if (pc == 4384) {
+                        int x = 1;
+                    }
+                    unsigned pc_update = pc+4;
+                    pair<Order, bool> IDret = ID(order);
+                    ID_EXE = IDret.first;
+                    jump1 = IDret.second;
+                    pair<Order, bool> EXEret = EXE(ID_EXE);
+                    EXE_MEM = EXEret.first;
+                    jump2 = EXEret.second;
+                    MEM_WB = MEM(EXE_MEM);
+                    WB(MEM_WB);
+
+                    if (!jump1 && !jump2) pc = pc_update;
+                } catch (...) {
+                    exit(-1);
+                }
+            }
+        }
+        void input() {
             string str, record;
             while (getline(cin, str)) {
                 if (str[0] == '@') {
                     record = str.substr(1);
                     pc = HEXtoBIN(record);
-                    //choose地址一定是4的倍数
                 }
                 else {
                     string section;
@@ -354,16 +608,6 @@ namespace RA {
                 }
             }
             pc = 0;
-            while (true) {
-                unsigned order = fetch(pc);
-                try {
-                    if (!Execute(order)) pc+=4;
-                    //Execute false: 无跳转
-                    //Execute true: 有跳转
-                } catch (...) {
-                    exit(1);
-                }
-            }
         }
     };
 }

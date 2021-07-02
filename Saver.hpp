@@ -6,7 +6,6 @@
 #define RISK_V_SIMULATOR_SAVER_HPP
 //register, memory and etc.
 namespace RA{
-    //32位寄存器
     class Register {
         unsigned int reg[32]={0};
     public:
@@ -20,18 +19,14 @@ namespace RA{
         }
     };
 
-    //内存池
     class Memory {
-        unsigned int *mem;
+        unsigned int mem[501000]{};
     public:
-        explicit Memory(int size = 1<<20) {
-            mem = new unsigned int [size];
-            for (int i = 0 ; i < size ; ++i)
+        explicit Memory() {
+            for (int i = 0 ; i < 500000 ; ++i)
                 mem[i] = 0;
         }
-        ~Memory() {
-            delete []mem;
-        }
+        ~Memory() = default;
 
 
         unsigned int &operator[](const unsigned int &foo) {
@@ -39,5 +34,35 @@ namespace RA{
         }
 
     };
+    enum OrderType {
+        lui, auipc,
+        jal, jalr,
+        beq, bne, blt, bge, bltu, bgeu,
+        lb, lh, lw, lbu, lhu,
+        sb, sh, sw,
+        addi, slti, sltiu, xori, ori, andi, slli, srli, srai,
+        add, sub, sll, slt, sltu, xorr, srl, sra, orr, andd,
+        uninit
+    };
+    class Order {
+    public:
+        unsigned opcode = 0;
+        unsigned rd = 0;
+        unsigned rs1 = 0;
+        unsigned rs2 = 0;
+        unsigned shamt = 0;
+        unsigned xrd = 0;
+        unsigned xrs1 = 0;
+        unsigned xrs2 = 0;
+        unsigned imm = 0;
+        unsigned funct3 = 0;
+        unsigned funct7 = 0;
+        unsigned output = 0;
+        OrderType type = uninit;
+
+        Order() = default;
+        ~Order() = default;
+    };
+
 }
 #endif //RISK_V_SIMULATOR_SAVER_HPP
