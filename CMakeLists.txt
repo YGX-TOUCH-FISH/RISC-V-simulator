@@ -1,7 +1,7 @@
-cmake_minimum_required(VERSION 3.19)
+cmake_minimum_required(VERSION 3.16.3)
 project(code)
 
 set(CMAKE_CXX_STANDARD 14)
 
-add_executable(RISK_V_simulator
+add_executable(code
         main.cpp IO.hpp Saver.hpp Executer.hpp exception.hpp)
