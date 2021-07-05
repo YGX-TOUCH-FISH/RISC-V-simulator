@@ -22,14 +22,6 @@ namespace RA {
         unsigned int s = h-l+1;
         return (x & ((1<<s)-1)<<l) >> l;
     }
-    unsigned zero_ext(unsigned x, unsigned upbd) {
-        //upbd为最高位
-        //无符号扩展
-        unsigned int s = 31-upbd;
-        x <<= s;
-        x >>= s;
-        return x;
-    }
     unsigned sign_ext(unsigned x, unsigned upbd) {
         //有符号扩展
         unsigned int s = 31-upbd;

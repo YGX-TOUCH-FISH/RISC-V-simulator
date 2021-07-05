@@ -5,7 +5,7 @@
 using namespace std;
 int main() {
     RA::ioSystem System;
-//    freopen("../testcases/pi.data", "r", stdin);
+//    freopen("../testcases/sample/sample.data", "r", stdin);
     System.input();
     System.run();
     return 0;

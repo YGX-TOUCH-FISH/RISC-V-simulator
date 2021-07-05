@@ -10,6 +10,7 @@
 #include "Saver.hpp"
 #include "Executer.hpp"
 #include "exception.hpp"
+#include "Pridictor.hpp"
 using namespace std;
 namespace RA {
     class ioSystem {
@@ -18,11 +19,11 @@ namespace RA {
         Register X;
         unsigned pc = 0;
         unsigned pc_update = 0;
+        Predictor Prophet;
         pair<unsigned, unsigned> buffer1;
         Order buffer2;
         Order buffer3;
         Order buffer4;
-        //两stage之间的指令状态
     private:
         unsigned read(unsigned offset, unsigned n) {
             unsigned ret = 0;
@@ -38,6 +39,7 @@ namespace RA {
                 memory[offset+i] = piece;
             }
         }
+
         unsigned IF(unsigned offset) {
             unsigned ret = 0;
             for (int i = 3 ; i >= 0 ; --i) {
@@ -47,8 +49,6 @@ namespace RA {
 
             return ret;
         }
-        //Instrcution Fetch
-
         Order ID(pair<unsigned, unsigned>ord) {
             Order ret;
             if (ord.first == 0) return ret;//nop指令
@@ -212,11 +212,6 @@ namespace RA {
             else throw syntax_error();
             return ret;
         }
-        //分解order,计算imm、寄存器的值、进行符号扩展
-        //TODO 计算关于pc的possible branch值...(risk)
-        //获取寄存器的值
-        //Instruction Decode
-
         Order EXE(Order order) {
             if (order.isNop) return order;
             Order ret(order);
@@ -387,11 +382,6 @@ namespace RA {
             }
             return ret;
         }
-        //算数指令：完成运算
-        //访存指令：计算出对应地址
-        //跳转指令：执行跳转
-        //Execute
-
         Order MEM(Order order) {
             if (order.isNop) return order;
             Order ret(order);
@@ -431,9 +421,6 @@ namespace RA {
             }
             return ret;
         }
-        //仅对访存指令进行操作
-        //Memory Access
-
         Order WB(Order order) {
             if (order.isNop) return order;
             Order ret(order);
@@ -553,8 +540,6 @@ namespace RA {
             }
             return ret;
         }
-        //对于需要写回的指令
-        //Write Back
     public:
         ioSystem() = default;
         ~ioSystem() = default;
@@ -569,7 +554,6 @@ namespace RA {
                     buffer3 = EXE(buffer2);
                     buffer2 = ID(buffer1);
                     if (!buffer2.isNop && !buffer3.isNop && buffer2.type != jal && buffer2.clas != U && buffer3.clas != S && buffer3.clas != B) {
-                        //不为空指令，有读有写
                         if (buffer2.clas == R || buffer2.clas == B || buffer2.clas == S) {
                             if (buffer2.rs1 == buffer3.rd) buffer2.xrs1 = buffer3.xrd, hazard1 = true;
                             if (buffer2.rs2 == buffer3.rd) buffer2.xrs2 = buffer3.xrd, hazard2 = true;
@@ -587,7 +571,7 @@ namespace RA {
                             if (!hazard1 && buffer2.rs1 == buffer4.rd) buffer2.xrs1 = buffer4.xrd;
                         }
                     }
-                    //1 forwarding
+                    //forwarding
                     if (!buffer2.isNop && buffer2.type == jalr) {
                         pc_update = (buffer2.xrs1+buffer2.imm)&(-1);
                         HALT = true;
@@ -620,19 +604,18 @@ namespace RA {
                             }
                         }
                     }
-                    //2 B-type跳转或jalr (对reg有访问要求的跳转)
-                    if (buffer2.pc == 4336) {
-                        int x = 1;
-                    }
+                    //branch jump
+
+                    //HALT: 发生条件跳转
                     if (HALT) {
+                        Prophet.update(true);
                         pc = pc_update;
-                        buffer1 = make_pair(0, 0);
+                        buffer1 = make_pair(0, 0);//插入bubble
                         continue;
                     }
-                    //true:IF段插入bubble, pc跳转
-                    //false:正常下读
+                    else Prophet.update(false);
 
-                    buffer1 = make_pair(IF(pc), pc);//正常读一个
+                    buffer1 = make_pair(IF(pc), pc);
                     unsigned order = buffer1.first;
                     unsigned opcode = cut(order, 6, 0);
                     
@@ -654,7 +637,6 @@ namespace RA {
                         continue;
                         //插入bubble，pc停止一周期
                     }
-                    
                     if (opcode == 0b1101111) {
                         unsigned p1(cut(order, 31, 31));//offset 20
                         unsigned p2(cut(order, 30, 21));//offset 10-1
@@ -664,7 +646,6 @@ namespace RA {
                         imm = sign_ext(imm, 20);
                         pc_update = pc + imm;
                     }
-
                     pc = pc_update;
                 } catch (...) {
                     exit(-1);
