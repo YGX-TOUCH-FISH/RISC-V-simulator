@@ -44,6 +44,10 @@ namespace RA{
         add, sub, sll, slt, sltu, xorr, srl, sra, orr, andd,
         uninit
     };
+
+    enum TYPE {
+        R, I, S, B, U, J, N
+    };
     class Order {
     public:
         unsigned opcode = 0;
@@ -58,10 +62,18 @@ namespace RA{
         unsigned funct3 = 0;
         unsigned funct7 = 0;
         unsigned output = 0;
+        unsigned pc = 0;//当前指令的pc值
         OrderType type = uninit;
+
+        TYPE clas = N;
+        bool isNop = true;
+        bool jump = false;
 
         Order() = default;
         ~Order() = default;
+        bool isLoad() const{
+            return (type == lb) || (type == lh) || (type == lw) || (type == lbu) || (type == lhu);
+        }
     };
 
 }

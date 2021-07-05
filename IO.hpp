@@ -10,32 +10,19 @@
 #include "Saver.hpp"
 #include "Executer.hpp"
 #include "exception.hpp"
-//TODO hazard：
-// //
-// 结构冒险：同一时钟周期访问相同的硬件
-// 寄存器的读写速度快，前半个时钟周期写，后半个时钟周期读
-// 且设置独立的读写口
-// //
-// 数据冒险：这一条指令所需的数据还未被写入，但下一条指令需要该数据
-// 1 插入nop指令
-// 2 数据前递，由上一条指令的ALU结果传给下一条指令的ALU(Bypass)
-// Load Use Hazard: 一条指令需要用到之前指令的访存结果，插入nop, forwarding
-// //
-// 控制冒险：下一次取指由上一条指令的结果确定
-// 转移会使部分取指被废除
-// 无条件间接转移：等待1clock至译码结束
-// 条件转移：译码结束后，交由ALU比较(条件)。但如果条件是[是否相等]这种比较简单的条件，不需ALU，可在ID阶段结束后返回值
-
 using namespace std;
 namespace RA {
     class ioSystem {
     private:
         Memory memory;
         Register X;
+        unsigned pc_prev = 0;
         unsigned pc = 0;
-        Order ID_EXE;
-        Order EXE_MEM;
-        Order MEM_WB;
+        unsigned pc_update = 0;
+        pair<unsigned, unsigned> buffer1;
+        Order buffer2;
+        Order buffer3;
+        Order buffer4;
         //两stage之间的指令状态
     private:
         unsigned read(unsigned offset, unsigned n) {
@@ -58,12 +45,19 @@ namespace RA {
                 ret <<= 8;
                 ret |= memory[offset+i];
             }
+
             return ret;
         }
         //Instrcution Fetch
 
-        pair<Order, bool> ID(unsigned order) {
+        Order ID(pair<unsigned, unsigned>ord) {
             Order ret;
+            if (ord.first == 0) return ret;//nop指令
+
+            unsigned order(ord.first);
+            unsigned PC(ord.second);
+            ret.pc = PC;//传递、记录指令的pc
+            ret.isNop = false;//当传入order为0时则为nop指令！
             if (order == 0x0ff00513) {
                 cout << (((unsigned)X[10]) & 255u);
                 exit(0);
@@ -75,26 +69,26 @@ namespace RA {
                 ret.xrd = X[ret.rd];
                 ret.imm = cut(order, 31, 12)<<12;
                 ret.type = lui;
-                return make_pair(ret, false);
+                ret.clas = U;
             }
             else if (ret.opcode == 23) {
                 ret.rd = cut(order, 11, 7);
                 ret.xrd = X[ret.rd];
                 ret.imm = cut(order, 31, 12)<<12;
                 ret.type = auipc;
-                return make_pair(ret, false);
+                ret.clas = U;
             }
             else if (ret.opcode == 111) {
                 ret.rd = cut(order, 11, 7);
                 ret.xrd = X[ret.rd];
                 ret.type = jal;
+                ret.clas = J;
                 unsigned p1(cut(order, 31, 31));//offset 20
                 unsigned p2(cut(order, 30, 21));//offset 10-1
                 unsigned p3(cut(order, 20, 20));//offset 11
                 unsigned p4(cut(order, 19, 12));//offset 19-12
                 ret.imm = (p1<<20)|(p4<<12)|(p3<<11)|(p2<<1);
                 ret.imm = sign_ext(ret.imm, 20);
-                return make_pair(ret, true);
             }
             else if (ret.opcode == 103) {
                 ret.rd = cut(order, 11, 7);
@@ -102,8 +96,8 @@ namespace RA {
                 ret.rs1 = cut(order, 19, 15);
                 ret.xrs1 = X[ret.rs1];
                 ret.type = jalr;
+                ret.clas = I;
                 ret.imm = sign_ext(cut(order, 31, 20), 11);
-                return make_pair(ret, true);
             }
             else if (ret.opcode == 99) {
                 unsigned p1(cut(order, 31, 31));//offset 12
@@ -119,6 +113,7 @@ namespace RA {
                 ret.rs2 = cut(order, 24, 20);
                 ret.xrs1 = X[ret.rs1];
                 ret.xrs2 = X[ret.rs2];
+                ret.clas = B;
                 switch (ret.funct3) {
                     case 0: ret.type = beq; break;
                     case 1: ret.type = bne; break;
@@ -127,7 +122,6 @@ namespace RA {
                     case 6: ret.type = bltu; break;
                     case 7: ret.type = bgeu; break;
                 }
-                return make_pair(ret, false);
             }
             else if (ret.opcode == 3) {
                 ret.rd = cut(order, 11, 7);
@@ -136,6 +130,7 @@ namespace RA {
                 ret.rs1 = cut(order, 19, 15);
                 ret.xrs1 = X[ret.rs1];
                 ret.imm = sign_ext(cut(order, 31, 20), 11);
+                ret.clas = I;
                 switch (ret.funct3) {
                     case 0: ret.type = lb; break;
                     case 1: ret.type = lh; break;
@@ -143,7 +138,6 @@ namespace RA {
                     case 4: ret.type = lbu;break;
                     case 5: ret.type = lhu;break;
                 }
-                return make_pair(ret, false);
             }
             else if (ret.opcode == 35) {
                 ret.funct3 = cut(order, 14, 12);
@@ -155,12 +149,12 @@ namespace RA {
                 unsigned p2(cut(order, 11, 7));
                 ret.imm = (p1<<5)|p2;
                 ret.imm = sign_ext(ret.imm, 11);
+                ret.clas = S;
                 switch (ret.funct3) {
                     case 0: ret.type = sb;break;
                     case 1: ret.type = sh;break;
                     case 2: ret.type = sw;break;
                 }
-                return make_pair(ret, false);
             }
             else if (ret.opcode == 19) {
                 ret.rd = cut(order, 11, 7);
@@ -171,6 +165,7 @@ namespace RA {
                 ret.imm = sign_ext(cut(order, 31, 20), 11);
                 ret.shamt = cut(order, 25, 20);
                 ret.funct7 = cut(order, 31, 25);
+                ret.clas = I;
                 switch (ret.funct3) {
                     case 0:ret.type = addi;break;
                     case 1:ret.type = slli;break;
@@ -185,7 +180,6 @@ namespace RA {
                     case 6:ret.type = ori;break;
                     case 7:ret.type = andi;break;
                 }
-                return make_pair(ret, false);
             }
             else if (ret.opcode == 51) {
                 ret.rd = cut(order, 11, 7);
@@ -196,6 +190,7 @@ namespace RA {
                 ret.xrs2 = X[ret.rs2];
                 ret.funct3 = cut(order, 14, 12);
                 ret.funct7 = cut(order, 31, 25);
+                ret.clas = R;
                 switch (ret.funct3) {
                     case 0: {
                         if (ret.funct7 == 0) ret.type = add;
@@ -214,65 +209,62 @@ namespace RA {
                     case 6: ret.type = orr;break;
                     case 7: ret.type = andd;break;
                 }
-                return make_pair(ret, false);
             }
             else throw syntax_error();
+            return ret;
         }
         //分解order,计算imm、寄存器的值、进行符号扩展
         //TODO 计算关于pc的possible branch值...(risk)
         //获取寄存器的值
         //Instruction Decode
 
-        pair<Order, bool> EXE(Order order) {
+        Order EXE(Order order) {
+            if (order.isNop) return order;
             Order ret(order);
-            bool jump = false;
             switch (ret.type) {
                 case lui: {
                     ret.xrd = ret.imm;
                     break;
                 }
                 case auipc: {
-                    ret.xrd = pc + ret.imm;
+                    ret.xrd = ret.pc + ret.imm;
                     break;
                 }
                 case jal: {
-                    if (ret.rd != 0) ret.xrd = pc+4;
-                    pc += ret.imm;
-                    jump = true;
+                    if (ret.rd != 0) ret.xrd = ret.pc+4;
+                    ret.pc += ret.imm;
                     break;
                 }
                 case jalr: {
-                    unsigned t = pc+4;
-                    pc = (ret.xrs1+ret.imm)&(-1);
+                    unsigned t = ret.pc+4;
+                    ret.pc = (ret.xrs1+ret.imm)&(-1);
                     if (ret.rd != 0) ret.xrd = t;
-                    jump = true;
                     break;
                 }
                 case beq: {
-                    if (ret.xrs1 == ret.xrs2) pc += ret.imm, jump = true;
+                    if (ret.xrs1 == ret.xrs2) ret.pc += ret.imm;
                     break;
                 }
                 case bne: {
-                    if (ret.xrs1 != ret.xrs2) pc += ret.imm, jump = true;
+                    if (ret.xrs1 != ret.xrs2) ret.pc += ret.imm;
                     break;
                 }
                 case blt: {
-                    if ((signed)ret.xrs1 < (signed)ret.xrs2) pc += ret.imm, jump = true;
+                    if ((signed)ret.xrs1 < (signed)ret.xrs2) ret.pc += ret.imm;
                     break;
                 }
                 case bge: {
-                    if ((signed)ret.xrs1 >= (signed)ret.xrs2) pc += ret.imm, jump = true;
+                    if ((signed)ret.xrs1 >= (signed)ret.xrs2) ret.pc += ret.imm;
                     break;
                 }
                 case bltu: {
-                    if (ret.xrs1 < ret.xrs2) pc += ret.imm, jump = true;
+                    if (ret.xrs1 < ret.xrs2) ret.pc += ret.imm;
                     break;
                 }
                 case bgeu: {
-                    if (ret.xrs1 >= ret.xrs2) pc += ret.imm, jump = true;
+                    if (ret.xrs1 >= ret.xrs2) ret.pc += ret.imm;
                     break;
                 }
-                //
                 case lb: {
                     ret.output = ret.xrs1 + ret.imm;
                     break;
@@ -305,7 +297,6 @@ namespace RA {
                     ret.output = ret.xrs1 + ret.imm;
                     break;
                 }
-                //访存：计算出地址
                 case addi: {
                     ret.xrd = ret.xrs1+ret.imm;
                     break;
@@ -395,13 +386,15 @@ namespace RA {
                     break;
                 }
             }
-            return make_pair(ret, jump);
+            return ret;
         }
         //算数指令：完成运算
         //访存指令：计算出对应地址
+        //跳转指令：执行跳转
         //Execute
 
         Order MEM(Order order) {
+            if (order.isNop) return order;
             Order ret(order);
             switch (ret.type) {
                 case lb: {
@@ -443,6 +436,7 @@ namespace RA {
         //Memory Access
 
         Order WB(Order order) {
+            if (order.isNop) return order;
             Order ret(order);
             switch (ret.type) {
                 case lui: {
@@ -567,28 +561,136 @@ namespace RA {
         ~ioSystem() = default;
         void run() {
             while (true) {
+                bool HALT = false;
+                bool hazard1 = false, hazard2 = false;
                 try {
-                    bool jump = false, jump1 = false, jump2 = false;
-                    unsigned order = IF(pc);
-                    if (pc == 4384) {
+                    pc_update = pc+4;
+                    WB(buffer4);
+                    buffer4 = MEM(buffer3);
+                    buffer3 = EXE(buffer2);
+                    buffer2 = ID(buffer1);
+                    if (buffer2.pc == 4100) {
                         int x = 1;
                     }
-                    unsigned pc_update = pc+4;
-                    pair<Order, bool> IDret = ID(order);
-                    ID_EXE = IDret.first;
-                    jump1 = IDret.second;
-                    pair<Order, bool> EXEret = EXE(ID_EXE);
-                    EXE_MEM = EXEret.first;
-                    jump2 = EXEret.second;
-                    MEM_WB = MEM(EXE_MEM);
-                    WB(MEM_WB);
+                    if (!buffer2.isNop && !buffer3.isNop && buffer2.type != jal && buffer2.clas != U && buffer3.clas != S && buffer3.clas != B) {
+                        //不为空指令，有读有写
+                        if (buffer2.clas == R || buffer2.clas == B || buffer2.clas == S) {
+                            if (buffer2.rs1 == buffer3.rd) buffer2.xrs1 = buffer3.xrd, hazard1 = true;
+                            if (buffer2.rs2 == buffer3.rd) buffer2.xrs2 = buffer3.xrd, hazard2 = true;
+                        }
+                        else {
+                            if (buffer2.rs1 == buffer3.rd) buffer2.xrs1 = buffer3.xrd, hazard1 = true;
+                        }
+                    }
+                    if (!buffer2.isNop && !buffer4.isNop && buffer2.type != jal && buffer2.clas != U && buffer4.clas != S && buffer4.clas != B) {
+                        if (buffer2.clas == R || buffer2.clas == B || buffer2.clas == S) {
+                            if (!hazard1 && buffer2.rs1 == buffer4.rd) buffer2.xrs1 = buffer4.xrd;
+                            if (!hazard2 && buffer2.rs2 == buffer4.rd) buffer2.xrs2 = buffer4.xrd;
+                        }
+                        else {
+                            if (!hazard1 && buffer2.rs1 == buffer4.rd) buffer2.xrs1 = buffer4.xrd;
+                        }
+                    }
+                    //1 forwarding
+                    if (!buffer2.isNop && buffer2.type == jalr) {
+                        pc_update = (buffer2.xrs1+buffer2.imm)&(-1);
+                        HALT = true;
+                    }
+                    else if (!buffer2.isNop && buffer2.clas == B) {
+                        switch (buffer2.type) {
+                            case beq: {
+                                if (buffer2.xrs1 == buffer2.xrs2) pc_update = buffer2.pc + buffer2.imm, HALT = true;
+                                break;
+                            }
+                            case bne: {
+                                if (buffer2.xrs1 != buffer2.xrs2)  pc_update = buffer2.pc + buffer2.imm, HALT = true;
+                                break;
+                            }
+                            case blt: {
+                                if ((signed)buffer2.xrs1 < (signed)buffer2.xrs2) pc_update = buffer2.pc + buffer2.imm, HALT = true;
+                                break;
+                            }
+                            case bge: {
+                                if ((signed)buffer2.xrs1 >= (signed)buffer2.xrs2) pc_update = buffer2.pc + buffer2.imm, HALT = true;
+                                break;
+                            }
+                            case bltu:{
+                                if (buffer2.xrs1 < buffer2.xrs2) pc_update = buffer2.pc + buffer2.imm, HALT = true;
+                                break;
+                            }
+                            case bgeu:{
+                                if (buffer2.xrs1 >= buffer2.xrs2) pc_update = buffer2.pc + buffer2.imm, HALT = true;
+                                break;
+                            }
+                        }
+                    }
+                    //2 B-type跳转或jalr (对reg有访问要求的跳转)
+                    if (HALT) {
+                        pc = pc_update;
+                        buffer1 = make_pair(0, 0);
+                        continue;
+                    }
+                    //true:IF段插入bubble, pc跳转
+                    //false:正常下读
 
-                    if (!jump1 && !jump2) pc = pc_update;
+                    buffer1 = make_pair(IF(pc), pc);//正常读一个
+                    unsigned order = buffer1.first;
+                    unsigned opcode = cut(order, 6, 0);
+                    
+                    if (!buffer2.isNop && buffer2.isLoad() && opcode != 0b0110111 && opcode != 0b0010111 && opcode != 0b1101111) {
+                        //Load && Use
+                        unsigned rd = buffer2.rd;
+                        if (opcode == 0b1100011 || opcode == 0b0110011) { //R-type, B-type
+                            unsigned rs1 = cut(order, 19, 15);
+                            unsigned rs2 = cut(order, 24, 20);
+                            if (rs1 == rd || rs2 == rd) HALT = true;
+                        }
+                        else {
+                            unsigned rs1 = cut(order, 19, 15);
+                            if (rs1 == rd) HALT = true;
+                        }
+                    }
+                    if (HALT) {
+                        buffer1.first = 0;
+                        continue;
+                        //插入bubble，pc停止一周期
+                    }
+                    
+                    if (opcode == 0b1101111) {
+                        unsigned p1(cut(order, 31, 31));//offset 20
+                        unsigned p2(cut(order, 30, 21));//offset 10-1
+                        unsigned p3(cut(order, 20, 20));//offset 11
+                        unsigned p4(cut(order, 19, 12));//offset 19-12
+                        unsigned imm = (p1<<20)|(p4<<12)|(p3<<11)|(p2<<1);
+                        imm = sign_ext(imm, 20);
+                        pc_update = pc + imm;
+                    }
+
+                    pc = pc_update;
                 } catch (...) {
                     exit(-1);
                 }
             }
         }
+//        void run() {
+//            bool jump1, jump2;
+//            while (true) {
+//                jump1 = false, jump2 = false;
+//                pc_update = pc+4;
+//                try {
+//                    buffer1 = make_pair(IF(pc), pc);
+//                    buffer2 = ID(buffer1, jump1);
+//                    buffer3 = EXE(buffer2, jump2);
+//                    buffer4 = MEM(buffer3);
+//                    WB(buffer4);
+//
+//                    if (!jump1 && !jump2) pc = pc_update;
+//                    else pc = buffer3.pc;
+//                } catch (...) {
+//                    exit(-1);
+//                }
+//            }
+//        }
         void input() {
             string str, record;
             while (getline(cin, str)) {
