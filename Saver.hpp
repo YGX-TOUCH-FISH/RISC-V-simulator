@@ -5,6 +5,7 @@
 #ifndef RISK_V_SIMULATOR_SAVER_HPP
 #define RISK_V_SIMULATOR_SAVER_HPP
 //register, memory and etc.
+using namespace std;
 namespace RA{
     class Register {
         unsigned int reg[32]={0};
@@ -73,6 +74,16 @@ namespace RA{
         ~Order() = default;
         bool isLoad() const{
             return (type == lb) || (type == lh) || (type == lw) || (type == lbu) || (type == lhu);
+        }
+        void show() const {
+            cout << "rd:" << rd << '\n';
+            cout << "rs1:" << rs1 << '\n';
+            cout << "rs2:" << shamt << '\n';
+            cout << "xrs1:" << xrs1 << '\n';
+            cout << "xrs2:" << xrs2 << '\n';
+            cout << "imm:" << imm << '\n';
+            cout << "output:" << output << '\n';
+            cout << "pc:" << pc << '\n';
         }
     };
 

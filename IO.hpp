@@ -16,7 +16,6 @@ namespace RA {
     private:
         Memory memory;
         Register X;
-        unsigned pc_prev = 0;
         unsigned pc = 0;
         unsigned pc_update = 0;
         pair<unsigned, unsigned> buffer1;
@@ -569,9 +568,6 @@ namespace RA {
                     buffer4 = MEM(buffer3);
                     buffer3 = EXE(buffer2);
                     buffer2 = ID(buffer1);
-                    if (buffer2.pc == 4100) {
-                        int x = 1;
-                    }
                     if (!buffer2.isNop && !buffer3.isNop && buffer2.type != jal && buffer2.clas != U && buffer3.clas != S && buffer3.clas != B) {
                         //不为空指令，有读有写
                         if (buffer2.clas == R || buffer2.clas == B || buffer2.clas == S) {
@@ -625,6 +621,9 @@ namespace RA {
                         }
                     }
                     //2 B-type跳转或jalr (对reg有访问要求的跳转)
+                    if (buffer2.pc == 4336) {
+                        int x = 1;
+                    }
                     if (HALT) {
                         pc = pc_update;
                         buffer1 = make_pair(0, 0);
@@ -640,7 +639,7 @@ namespace RA {
                     if (!buffer2.isNop && buffer2.isLoad() && opcode != 0b0110111 && opcode != 0b0010111 && opcode != 0b1101111) {
                         //Load && Use
                         unsigned rd = buffer2.rd;
-                        if (opcode == 0b1100011 || opcode == 0b0110011) { //R-type, B-type
+                        if (opcode == 0b1100011 || opcode == 0b0110011 || opcode == 0b0100011) { //R-type, B-type, S-type
                             unsigned rs1 = cut(order, 19, 15);
                             unsigned rs2 = cut(order, 24, 20);
                             if (rs1 == rd || rs2 == rd) HALT = true;
@@ -672,25 +671,6 @@ namespace RA {
                 }
             }
         }
-//        void run() {
-//            bool jump1, jump2;
-//            while (true) {
-//                jump1 = false, jump2 = false;
-//                pc_update = pc+4;
-//                try {
-//                    buffer1 = make_pair(IF(pc), pc);
-//                    buffer2 = ID(buffer1, jump1);
-//                    buffer3 = EXE(buffer2, jump2);
-//                    buffer4 = MEM(buffer3);
-//                    WB(buffer4);
-//
-//                    if (!jump1 && !jump2) pc = pc_update;
-//                    else pc = buffer3.pc;
-//                } catch (...) {
-//                    exit(-1);
-//                }
-//            }
-//        }
         void input() {
             string str, record;
             while (getline(cin, str)) {
