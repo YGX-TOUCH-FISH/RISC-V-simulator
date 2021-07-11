@@ -10,7 +10,7 @@
 #include "Saver.hpp"
 #include "Executer.hpp"
 #include "exception.hpp"
-#include "Pridictor.hpp"
+#include "Pre.hpp"
 using namespace std;
 namespace RA {
     class ioSystem {
@@ -19,7 +19,7 @@ namespace RA {
         Register X;
         unsigned pc = 0;
         unsigned pc_update = 0;
-        Predictor Prophet;
+        Pre Prophet;
         pair<unsigned, unsigned> buffer1;
         Order buffer2;
         Order buffer3;
@@ -58,7 +58,9 @@ namespace RA {
             ret.pc = PC;//传递、记录指令的pc
             ret.isNop = false;//当传入order为0时则为nop指令！
             if (order == 0x0ff00513) {
-                cout << (((unsigned)X[10]) & 255u);
+                cout << (((unsigned)X[10]) & 255u) << '\n';
+                cout << Prophet.BRANCH << '\n';
+                cout << Prophet.SUCCESS << '\n';
                 exit(0);
             }
             ret.opcode = cut(order, 6, 0);
@@ -577,44 +579,54 @@ namespace RA {
                         HALT = true;
                     }
                     else if (!buffer2.isNop && buffer2.clas == B) {
+                        Prophet.BRANCH++;
                         switch (buffer2.type) {
                             case beq: {
                                 if (buffer2.xrs1 == buffer2.xrs2) pc_update = buffer2.pc + buffer2.imm, HALT = true;
+                                if (Prophet.match(HALT)) Prophet.SUCCESS++, Prophet.update(true);
+                                else Prophet.update(false);
                                 break;
                             }
                             case bne: {
                                 if (buffer2.xrs1 != buffer2.xrs2)  pc_update = buffer2.pc + buffer2.imm, HALT = true;
+                                if (Prophet.match(HALT)) Prophet.SUCCESS++, Prophet.update(true);
+                                else Prophet.update(false);
                                 break;
                             }
                             case blt: {
                                 if ((signed)buffer2.xrs1 < (signed)buffer2.xrs2) pc_update = buffer2.pc + buffer2.imm, HALT = true;
+                                if (Prophet.match(HALT)) Prophet.SUCCESS++, Prophet.update(true);
+                                else Prophet.update(false);
                                 break;
                             }
                             case bge: {
                                 if ((signed)buffer2.xrs1 >= (signed)buffer2.xrs2) pc_update = buffer2.pc + buffer2.imm, HALT = true;
+                                if (Prophet.match(HALT)) Prophet.SUCCESS++, Prophet.update(true);
+                                else Prophet.update(false);
                                 break;
                             }
                             case bltu:{
                                 if (buffer2.xrs1 < buffer2.xrs2) pc_update = buffer2.pc + buffer2.imm, HALT = true;
+                                if (Prophet.match(HALT)) Prophet.SUCCESS++, Prophet.update(true);
+                                else Prophet.update(false);
                                 break;
                             }
                             case bgeu:{
                                 if (buffer2.xrs1 >= buffer2.xrs2) pc_update = buffer2.pc + buffer2.imm, HALT = true;
+                                if (Prophet.match(HALT)) Prophet.SUCCESS++, Prophet.update(true);
+                                else Prophet.update(false);
                                 break;
                             }
                         }
                     }
                     //branch jump
 
-                    //HALT: 发生条件跳转
                     if (HALT) {
-                        Prophet.update(true);
                         pc = pc_update;
                         buffer1 = make_pair(0, 0);//插入bubble
                         continue;
                     }
-                    else Prophet.update(false);
-
+                    //IF
                     buffer1 = make_pair(IF(pc), pc);
                     unsigned order = buffer1.first;
                     unsigned opcode = cut(order, 6, 0);
@@ -646,6 +658,7 @@ namespace RA {
                         imm = sign_ext(imm, 20);
                         pc_update = pc + imm;
                     }
+
                     pc = pc_update;
                 } catch (...) {
                     exit(-1);

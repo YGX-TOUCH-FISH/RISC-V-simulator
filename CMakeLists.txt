@@ -4,4 +4,4 @@ project(code)
 set(CMAKE_CXX_STANDARD 14)
 
 add_executable(code
-        main.cpp IO.hpp Saver.hpp Executer.hpp exception.hpp Pridictor.hpp)
+        main.cpp IO.hpp Saver.hpp Executer.hpp exception.hpp Pre.hpp)
